@@ -1,0 +1,15 @@
+output: default
+groups:
+  parse:
+    name: Parse identified data
+    index: 0
+    disabled: false
+  validate:
+    name: Validate CIM conformance
+    index: 1
+    disabled: false
+  logndrop:
+    name: Log and drop invalid events
+    index: 2
+    disabled: false
+asyncFuncTimeout: 1000

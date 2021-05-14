@@ -1,17 +1,25 @@
+#!/usr/bin/env python3
+
 from argparse import ArgumentParser
+import logging
 import glob
 import re
+import sys
+import yaml
+from collections import OrderedDict
 
 conf = {}
+logger = logging.getLogger()
+
 
 def read_props(props):
     def set_sourcetype(line):
         if "::" in line and not "sourcetype::" in line:
-            print(f"Unsupported stanza: {line}")
+            logger.debug(f"Unsupported stanza: {line}")
             sourcetype = None
         else:
             sourcetype = re.match(r"^\[(?:sourcetype::)?([^\]]+)\]", line).group(1)
-            print(f"Applying to sourcetype {sourcetype}")
+            logger.debug(f"Applying to sourcetype {sourcetype}")
             if not sourcetype in conf.keys():
                 conf[sourcetype] = {"regexes": [], "report_references": [], "lookups": [], "aliases": []}
 
@@ -34,7 +42,11 @@ def read_props(props):
 
     def add_lookup(line):
         if "output" in line.lower():
-            match = re.match(r"LOOKUP.+?=\s*(?P<name>\S+)\s+(?P<src_fields>.+?)\s+OUTPUT\s+(?P<dest_fields>.+)", line, flags=re.IGNORECASE)
+            match = re.match(
+                r"LOOKUP.+?=\s*(?P<name>\S+)\s+(?P<src_fields>.+?)\s+OUTPUT\s+(?P<dest_fields>.+)",
+                line,
+                flags=re.IGNORECASE,
+            )
         else:
             match = re.match(r"LOOKUP.+?=\s*(?P<name>\S+)\s+(?P<src_fields>.+)")
 
@@ -51,16 +63,16 @@ def read_props(props):
                         add_extract(line)
                     elif line.startswith("FIELDALIAS"):
                         add_fieldaliases(line)
-                    elif line.startswith("REPORT"):
+                    elif line.startswith("REPORT") or line.startswith("TRANSFORMS"):
                         add_report_references(line)
                     elif line.startswith("LOOKUP"):
                         add_lookup(line)
                     elif line.startswith("EVAL"):
-                        print(f"Can't convert this EVAL statement automatically: {line}")
+                        logger.debug(f"Can't convert this EVAL statement automatically: {line}")
                     elif re.match(r"^(\s|#.+)*$", line):
                         continue
                     else:
-                        print(f"Unknown statement encountered: {line}")
+                        logger.debug(f"Unknown statement encountered: {line}")
 
 
 def read_transforms(transforms):
@@ -90,6 +102,12 @@ def read_transforms(transforms):
                 if name in conf[sourcetype]["report_references"]:
                     conf[sourcetype]["regexes"].append(report["regex"])
 
+    def add_report_property(report, property, value):
+        if report in reports:
+            reports[report][property] = value
+        else:
+            reports[report] = {property: value}
+
     reports = {}
     for t in transforms:
         with open(t) as f:
@@ -103,41 +121,102 @@ def read_transforms(transforms):
                     if re.search(r"\(\?P?<", match.group("regex")):  # Inline field names
                         add_inline_regex(line)
                     else:
-                        reports[current_report] = {"regex": match.group("regex")}
+                        add_report_property(current_report, "regex", match.group("regex"))
                 elif line.startswith("FORMAT"):
                     match = re.match(r"FORMAT.+?=\s*(?P<format>.+)", line)
-                    reports[current_report]["format"] = match.group("format")
+                    add_report_property(current_report, "format", match.group("format"))
 
     add_regexes_with_format(reports)
 
 
+def setup_logger(loglevel):
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(loglevel)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+def find_app_confs(app):
+    props = glob.glob(f"{app}/*/props.conf", recursive=True)
+    transforms = glob.glob(f"{app}/*/transforms.conf", recursive=True)
+    lookups = glob.glob(f"{app}/lookups/*", recursive=True)
+
+    logger.info("foo?")
+    logger.debug(f"Found the following props files: {props}")
+    logger.debug(f"Found the following transforms files: {transforms}")
+
+    return props, transforms, lookups
+
+
+def write_cribl_conf(conf, template):
+    with open(template) as f:
+        t = yaml.safe_load(f)
+
+    out = {"regexes": [], "aliases": []}
+    for sourcetype in conf.keys():
+        if len(conf[sourcetype].get("regexes", [])) > 0:
+            re_tpl = {
+                "id": "regex_extract",
+                "filter": True,
+                "disabled": False,
+                "conf": {
+                    "source": "_raw",
+                    "iterations": 100,
+                    "overwrite": False,
+                    "regex": f"/{conf[sourcetype]['regexes'][0]}/",
+                },
+                "groupId": "parse",
+            }
+            if len(conf[sourcetype].get("regexes", [])) > 1:
+                re_tpl["conf"]["regexList"] = [f"/{regex}/" for regex in conf[sourcetype]["regexes"][1:]]
+
+            out["regexes"].append(re_tpl)
+
+        if len(conf[sourcetype].get("aliases", [])) > 0:
+            out["aliases"].append(
+                {
+                    "id": "eval",
+                    "filter": True,
+                    "disabled": False,
+                    "conf": {
+                        "add": [
+                            {"name": dstfield, "value": srcfield} for srcfield, dstfield in conf[sourcetype]["aliases"]
+                        ]
+                    },
+                    "groupId": "parse",
+                }
+            )
+
+    t.setdefault("functions", []).append(out["regexes"])
+    t.setdefault("functions", []).append(out["aliases"])
+    print(yaml.safe_dump(t, sort_keys=False))
+
+
 def main():
     parser = ArgumentParser()
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument(
+        "-t",
+        "--template",
+        default=f"{sys.path[0]}/template.yml",
+        help="YAML template file to use for writing Cribl configuration",
+    )
+    parser.add_argument("-n", "--name", required=True, help="Name of the Cribl pipeline to create")
     parser.add_argument("app")
     args = parser.parse_args()
 
-    props = glob.glob(f"{args.app}/*/props.conf", recursive=True)
-    transforms = glob.glob(f"{args.app}/*/transforms.conf", recursive=True)
-    lookups = glob.glob(f"{args.app}/lookups/*", recursive=True)
+    if args.verbose:
+        setup_logger(logging.DEBUG)
+    else:
+        setup_logger(logging.INFO)
 
-    print(f"Found the following props files: {props}")
-    print(f"Found the following transforms files: {transforms}")
+    props, transforms, lookups = find_app_confs(args.app)
 
     read_props(props)
     read_transforms(transforms)
 
-    for sourcetype in conf.keys():
-        print(f"{sourcetype}\n--------------------------")
-        print("Regexes:")
-        for regex in conf[sourcetype]["regexes"]:
-            print(regex)
-
-        print("\nAliases:")
-        for srcfield, aliasfield in conf[sourcetype]["aliases"]:
-            print(f"{srcfield} as {aliasfield}")
-
-    
-
+    write_cribl_conf(conf, args.template)
 
 
 if __name__ == "__main__":
