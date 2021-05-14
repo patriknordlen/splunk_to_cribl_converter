@@ -50,6 +50,8 @@ def read_props(props):
         else:
             match = re.match(r"LOOKUP.+?=\s*(?P<name>\S+)\s+(?P<src_fields>.+)")
 
+        conf[sourcetype]["lookups"].append(match.groupdict())
+
     for p in props:
         with open(p) as f:
             sourcetype = None
@@ -142,9 +144,9 @@ def find_app_confs(app):
     transforms = glob.glob(f"{app}/*/transforms.conf", recursive=True)
     lookups = glob.glob(f"{app}/lookups/*", recursive=True)
 
-    logger.info("foo?")
     logger.debug(f"Found the following props files: {props}")
     logger.debug(f"Found the following transforms files: {transforms}")
+    logger.debug(f"Found the following lookup files: {lookups}")
 
     return props, transforms, lookups
 
